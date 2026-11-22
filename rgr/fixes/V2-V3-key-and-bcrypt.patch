@@ -1,0 +1,126 @@
+diff --git a/lib/insecurity.ts b/lib/insecurity.ts
+index b6039a8..a93ccfe 100644
+--- a/lib/insecurity.ts
++++ b/lib/insecurity.ts
+@@ -10,6 +10,7 @@ import { type UserModel } from '@juice-shop/models/user'
+ import expressJwt from 'express-jwt'
+ import jwt from 'jsonwebtoken'
+ import jws from 'jws'
++import bcrypt from 'bcryptjs'
+ import sanitizeHtmlLib from 'sanitize-html'
+ import sanitizeFilenameLib from 'sanitize-filename'
+ import * as utils from './utils'
+@@ -17,8 +18,31 @@ import * as utils from './utils'
+ // @ts-expect-error FIXME no typescript definitions for z85 :(
+ import * as z85 from 'z85'
+ 
+-export const publicKey = fs ? fs.readFileSync('encryptionkeys/jwt.pub', 'utf8') : 'placeholder-public-key'
+-const privateKey = '-----BEGIN RSA PRIVATE KEY-----\r\nMIICXAIBAAKBgQDNwqLEe9wgTXCbC7+RPdDbBbeqjdbs4kOPOIGzqLpXvJXlxxW8iMz0EaM4BKUqYsIa+ndv3NAn2RxCd5ubVdJJcX43zO6Ko0TFEZx/65gY3BE0O6syCEmUP4qbSd6exou/F+WTISzbQ5FBVPVmhnYhG/kpwt/cIxK5iUn5hm+4tQIDAQABAoGBAI+8xiPoOrA+KMnG/T4jJsG6TsHQcDHvJi7o1IKC/hnIXha0atTX5AUkRRce95qSfvKFweXdJXSQ0JMGJyfuXgU6dI0TcseFRfewXAa/ssxAC+iUVR6KUMh1PE2wXLitfeI6JLvVtrBYswm2I7CtY0q8n5AGimHWVXJPLfGV7m0BAkEA+fqFt2LXbLtyg6wZyxMA/cnmt5Nt3U2dAu77MzFJvibANUNHE4HPLZxjGNXN+a6m0K6TD4kDdh5HfUYLWWRBYQJBANK3carmulBwqzcDBjsJ0YrIONBpCAsXxk8idXb8jL9aNIg15Wumm2enqqObahDHB5jnGOLmbasizvSVqypfM9UCQCQl8xIqy+YgURXzXCN+kwUgHinrutZms87Jyi+D8Br8NY0+Nlf+zHvXAomD2W5CsEK7C+8SLBr3k/TsnRWHJuECQHFE9RA2OP8WoaLPuGCyFXaxzICThSRZYluVnWkZtxsBhW2W8z1b8PvWUE7kMy7TnkzeJS2LSnaNHoyxi7IaPQUCQCwWU4U+v4lD7uYBw00Ga/xt+7+UqFPlPVdz1yyr4q24Zxaw0LgmuEvgU5dycq8N7JxjTubX0MIRR+G9fmDBBl8=\r\n-----END RSA PRIVATE KEY-----'
++// РГР-фікс V2 (CWE-321/798): жодних жорстко закодованих ключів у коді.
++// Ключова пара завантажується з файлів поза системою контролю версій
++// (шляхи задаються змінними середовища); якщо файлів немає — генерується
++// ефемерна пара RSA-2048 на час роботи процесу. Старий витеклий 1024-бітний
++// ключ більше не підписує валідні токени, тож підробка стає неможливою.
++const keyPair = loadOrGenerateKeyPair()
++const privateKey = keyPair.privateKey
++export const publicKey = keyPair.publicKey
++
++function loadOrGenerateKeyPair (): { privateKey: string, publicKey: string } {
++  const privPath = process.env.JWT_PRIVATE_KEY_PATH
++  const pubPath = process.env.JWT_PUBLIC_KEY_PATH
++  if (privPath && pubPath && fs.existsSync(privPath) && fs.existsSync(pubPath)) {
++    return {
++      privateKey: fs.readFileSync(privPath, 'utf8'),
++      publicKey: fs.readFileSync(pubPath, 'utf8')
++    }
++  }
++  const pair = crypto.generateKeyPairSync('rsa', {
++    modulusLength: 2048,
++    publicKeyEncoding: { type: 'spki', format: 'pem' },
++    privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
++  })
++  return { privateKey: pair.privateKey, publicKey: pair.publicKey }
++}
+ 
+ interface ResponseWithUser {
+   status?: string
+@@ -41,6 +65,21 @@ interface IAuthenticatedUsers {
+ export const hash = (data: string) => crypto.createHash('md5').update(data).digest('hex')
+ export const hmac = (data: string) => crypto.createHmac('sha256', 'pa4qacea4VK9t9nGv7yZtwmj').update(data).digest('hex')
+ 
++// РГР-фікс V3 (CWE-916): паролі зберігаються як bcrypt-хеш (адаптивна функція
++// з унікальною сіллю), а не як незасолений MD5. Порівняння — стале за часом.
++const BCRYPT_ROUNDS = 10
++export const hashPassword = (clearText: string) => bcrypt.hashSync(clearText ?? '', BCRYPT_ROUNDS)
++export const comparePassword = (clearText: string, stored: string) => {
++  if (!stored || !stored.startsWith('$2')) {
++    return false
++  }
++  try {
++    return bcrypt.compareSync(clearText ?? '', stored)
++  } catch {
++    return false
++  }
++}
++
+ export const cutOffPoisonNullByte = (str: string) => {
+   const nullByte = '%00'
+   if (str.includes(nullByte)) {
+@@ -90,6 +129,30 @@ export const authenticatedUsers: IAuthenticatedUsers = {
+   }
+ }
+ 
++// РГР-фікс V6 (CWE-613): серверне відкликання сесій. Вихід заносить токен до
++// списку відкликаних; middleware відхиляє відкликані токени до перевірки
++// авторизації, тож викрадений токен після виходу стає недійсним.
++const revokedTokens = new Set<string>()
++export const revokeToken = (token?: string) => {
++  if (!token) return
++  const t = utils.unquote(token)
++  revokedTokens.add(t)
++  const entry = authenticatedUsers.tokenMap[t]
++  if (entry?.data?.id !== undefined) {
++    delete authenticatedUsers.idMap[entry.data.id]
++  }
++  delete authenticatedUsers.tokenMap[t]
++}
++export const isTokenRevoked = (token?: string) => token ? revokedTokens.has(utils.unquote(token)) : false
++export const checkBlocklistedToken = () => (req: Request, res: Response, next: NextFunction) => {
++  const token = utils.jwtFrom(req) ?? req.cookies?.token
++  if (isTokenRevoked(token)) {
++    res.status(401).json({ status: 'error', message: 'Token has been revoked' })
++    return
++  }
++  next()
++}
++
+ export const userEmailFrom = ({ headers }: any) => {
+   return headers ? headers['x-user-email'] : undefined
+ }
+@@ -185,8 +248,10 @@ export const appendUserId = () => {
+ 
+ export const updateAuthenticatedUsers = () => (req: Request, res: Response, next: NextFunction) => {
+   const token = req.cookies.token || utils.jwtFrom(req)
+-  if (token && authenticatedUsers.get(token) === undefined) {
+-    jwt.verify(token, publicKey, (err: Error | null, decoded: any) => {
++  // РГР-фікс V6: не відновлювати сесію за відкликаним токеном.
++  if (token && !isTokenRevoked(token) && authenticatedUsers.get(token) === undefined) {
++    // РГР-фікс V2: примусовий алгоритм RS256 (захист від plaintext/alg-confusion).
++    jwt.verify(token, publicKey, { algorithms: ['RS256'] } as any, (err: Error | null, decoded: any) => {
+       if (err === null && decoded?.data !== undefined) {
+         authenticatedUsers.put(token, decoded)
+         res.cookie('token', token)
+diff --git a/models/user.ts b/models/user.ts
+index 054fd23..f0790f6 100644
+--- a/models/user.ts
++++ b/models/user.ts
+@@ -70,7 +70,8 @@ const UserModelInit = (sequelize: Sequelize) => { // vuln-code-snippet start wea
+       password: {
+         type: DataTypes.STRING,
+         set (clearTextPassword: string) {
+-          this.setDataValue('password', security.hash(clearTextPassword)) // vuln-code-snippet vuln-line weakPasswordChallenge
++          // РГР-фікс V3 (CWE-916): bcrypt замість незасоленого MD5.
++          this.setDataValue('password', security.hashPassword(clearTextPassword))
+         }
+       }, // vuln-code-snippet end weakPasswordChallenge
+       role: {

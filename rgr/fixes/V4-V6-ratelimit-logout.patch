@@ -1,0 +1,55 @@
+diff --git a/routes/logout.ts b/routes/logout.ts
+new file mode 100644
+index 0000000..9e0cb08
+--- /dev/null
++++ b/routes/logout.ts
+@@ -0,0 +1,18 @@
++/*
++ * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
++ * SPDX-License-Identifier: MIT
++ */
++import { type Request, type Response, type NextFunction } from 'express'
++import * as security from '../lib/insecurity'
++import * as utils from '../lib/utils'
++
++// РГР-фікс V6 (CWE-613): серверний вихід відкликає поточний токен, тож він
++// більше не дає доступу до захищених ендпойнтів навіть у межах строку дії.
++export function logout () {
++  return (req: Request, res: Response, next: NextFunction) => {
++    const token = utils.jwtFrom(req) ?? req.cookies?.token
++    security.revokeToken(token)
++    res.clearCookie('token')
++    res.json({ status: 'success' })
++  }
++}
+diff --git a/server.ts b/server.ts
+index d1d9a4c..7d375fe 100644
+--- a/server.ts
++++ b/server.ts
+@@ -66,6 +66,7 @@ import datacreator from './data/datacreator'
+ import locales from './data/static/locales.json'
+ 
+ import { login } from './routes/login'
++import { logout } from './routes/logout'
+ import * as verify from './routes/verify'
+ import * as address from './routes/address'
+ import * as metrics from './routes/metrics'
+@@ -384,6 +385,7 @@ function configureApp (app: ReturnType<typeof express>, seq: typeof sequelize) {
+   /* Checks on JWT in Authorization header */ // vuln-code-snippet hide-line
+   app.use(verify.jwtChallenges()) // vuln-code-snippet hide-line
+   app.use(security.updateAuthenticatedUsers()) // vuln-code-snippet hide-line
++  app.use(security.checkBlocklistedToken()) // РГР-фікс V6: відхиляти відкликані токени
+   /* Baskets: Unauthorized users are not allowed to access baskets */
+   app.use('/rest/basket', security.isAuthorized(), security.appendUserId())
+   /* BasketItems: API only accessible for authenticated users */
+@@ -632,7 +634,9 @@ function configureApp (app: ReturnType<typeof express>, seq: typeof sequelize) {
+   }
+ 
+   /* Custom Restful API */
+-  app.post('/rest/user/login', login())
++  // РГР-фікс V4 (CWE-307): обмеження частоти спроб входу проти брутфорсу.
++  app.post('/rest/user/login', rateLimit({ windowMs: 5 * 60 * 1000, max: 10, keyGenerator ({ ip }: { ip: any }) { return ip }, validate: false }), login())
++  app.post('/rest/user/logout', utils.asyncHandler(logout())) // РГР-фікс V6
+   app.get('/rest/user/change-password', utils.asyncHandler(changePassword()))
+   app.post('/rest/user/reset-password', utils.asyncHandler(resetPassword()))
+   app.get('/rest/user/security-question', utils.asyncHandler(securityQuestion()))

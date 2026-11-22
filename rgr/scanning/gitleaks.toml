@@ -1,0 +1,12 @@
+# Конфігурація gitleaks для РГР: дефолтні правила + виключення vendor/згенерованого.
+[extend]
+useDefault = true
+[allowlist]
+description = "Виключити залежності та згенеровані артефакти"
+paths = [
+  '''node_modules/''',
+  '''frontend/node_modules/''',
+  '''build/''',
+  '''frontend/dist/''',
+  '''package-lock\.json''',
+]

@@ -12,3 +12,7 @@ node_modules/
 
 # збірка
 out/
+
+# РГР: вразлива ціль відтворюється через rgr/apply-fixes.sh (не комітимо ~1 ГБ)
+rgr/upstream/
+rgr/docs/report/reference.docx

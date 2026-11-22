@@ -1,0 +1,14 @@
+# Ізольоване розгортання цілі РГР (варіант 19 — OWASP Juice Shop).
+# Мережа internal: без маршруту до зовнішньої мережі. Порт прив'язаний лише до loopback.
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:v20.4.0
+    container_name: rgr-juiceshop
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - isolated
+    restart: "no"
+networks:
+  isolated:
+    internal: true
